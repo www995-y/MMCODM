@@ -1,0 +1,188 @@
+%% a litte clean work
+close all;
+clear;
+clc;
+addpath(genpath(pwd));
+%%
+load YM966.mat
+X=data_ysgp;
+y=data_ystp;
+X=snv(X);
+X=sgolayfilt(X,3,5);
+train_data = X;
+train_label = y;
+k=1000;
+%%
+[m_size n_size] = size(train_data); 
+for gen = 1:k
+    [train1, test] = crossvalind('HoldOut',m_size,1/5);
+    data_train = train_data(train1,:); %For the selection of calibration set sample data
+    label_train = train_label(train1,:); %It is used to select the germination percentage of the corrected set samples
+    data_test = train_data(test,:); %Select the sample data of the test set
+    label_test = train_label(test,:);%Select the germination percentage of the test set
+%% PLS
+ncomp=13;
+[Xloadings,Yloadings,Xscores,Yscores,betaPLS,PLSpctvar,MSE,stats] = plsregress(data_train,label_train,ncomp);
+N = size(data_test,1);
+pre_test = [ones(N,1) data_test] * betaPLS;
+temp_residual_PLS= abs(pre_test-label_test);
+num=0;
+  for j=1:m_size 
+      if test(j)==1
+          num=num+1;
+          residual_L_PLS(gen,j)=temp_residual_PLS(num,1);
+          else
+            residual_L_PLS(gen, j) = NaN;
+      end
+  end
+%% GPR
+meanfunc = @meanConst;
+% covfunc = @covRQiso; %RQ）
+covfunc = @covLINiso; %
+likfunc = @likGauss; %
+% hyp = struct('mean', 3, 'cov', [0 0 0], 'lik', -1);%hyp
+hyp = struct('mean', 3, 'cov', 0, 'lik', -1);
+hyp2 = minimize(hyp, @gp, -15, @infGaussLik, meanfunc, covfunc, likfunc,data_train, label_train);
+[yfit, ys] = gp(hyp2, @infGaussLik, meanfunc, covfunc, likfunc, data_train, label_train, data_test);
+% 计算残差
+temp_residual_GPR = abs(yfit - label_test);
+num=0;
+for j=1:m_size %1:315
+      if test(j)==1
+          num=num+1;
+          residual_L_GPR(gen,j)=temp_residual_GPR(num,1);
+          else
+          residual_L_GPR(gen, j) = NaN; 
+      end
+end
+ %% SVM Antlion algorithm for optimization
+[Elite_antlion_fitness,Elite_antlion_position,Convergence_curve]=ALOSVMcgforclass_cv(10,50,[1,0.0001],[1000,0.1],2,@objfun_svm_cv,label_train,data_train);
+bestc = Elite_antlion_position(1);
+bestg = Elite_antlion_position(2);
+cmd = [' -s 3',' -c ',num2str(bestc),' -g ',num2str(bestg)];
+model=svmtrain(label_train,data_train,cmd);
+[Predicttrain,accuracy1,prob_estimates] = svmpredict(label_train,data_train,model);%ptrain  
+[PredictLabel,accuracy2,prob_estimates] = svmpredict(label_test,data_test,model);%PredictLabel 
+temp_residual_SVM= abs(PredictLabel-label_test);
+num=0;
+for j=1:m_size 
+      if test(j)==1
+            num=num+1;
+            residual_L_SVM(gen,j)=temp_residual_SVM(num,1);
+      else
+            residual_L_SVM(gen, j) = NaN; 
+      end   
+end
+%% BP
+P_train= data_train';
+T_train=  label_train';
+P_test=data_test';
+T_test= label_test';
+[p_train, ps_input] = mapminmax(P_train,0,1);
+p_test = mapminmax('apply',P_test,ps_input);
+[t_train, ps_output] = mapminmax(T_train,0,1);
+M = size(P_train,2);
+N = size(P_test,2);
+net = newff(p_train,t_train,3);
+net.trainParam.epochs = 200;
+net.trainParam.goal = 1e-3;
+net.trainParam.lr = 0.01;
+net.trainParam.showWindow=0;
+net = train(net,p_train,t_train);
+t_sim1 = sim(net,p_train);
+t_sim = sim(net,p_test);
+T_sim1 = mapminmax('reverse',t_sim1,ps_output);
+T_sim = mapminmax('reverse',t_sim,ps_output);
+    temp_residual_BP= abs(T_sim'-label_test);
+    [test_m,test_n]=size(temp_residual_BP);
+    num=0;
+    for j=1:m_size %1:315
+        if test(j)==1
+            num=num+1;
+            residual_L_BP (gen,j)=temp_residual_BP(num,1);
+          else
+            residual_L_BP(gen, j) = NaN; % 不在索引的值设置为NaNend
+        end
+    end
+end
+%% calculated the mean and SD of the residuals 
+% PLS
+for i=1:m_size 
+    R_L_PLS=residual_L_PLS(:,i);
+    Mean_Residual_L_PLS(i)=nanmean(R_L_PLS);
+    Var_Residual_L_PLS(i)=nanvar(R_L_PLS);
+    Number(i)=i;%
+end
+[Mx,Nx]=size(X_de2);
+Mean=0.2514;  Var=0.0024;
+m_PLS=[];
+for i=1:max(size(Mean_Residual_L_PLS))
+    if Mean_Residual_L_PLS(i)>Mean | Var_Residual_L_PLS(i)>Var
+       m_PLS= [m_PLS,i];
+    end
+end
+% GPR
+for i=1:m_size 
+    R_L_GPR=residual_L_GPR(:,i);
+    Mean_Residual_L_GPR(i)=nanmean(R_L_GPR);
+    Var_Residual_L_GPR(i)=nanvar(R_L_GPR);
+    Number(i)=i;%
+end
+Mean=0.8;Var=0.008;
+m_GPR=[];
+for i=1:max(size(Mean_Residual_L_GPR))
+    if Mean_Residual_L_GPR(i)>Mean | Var_Residual_L_GPR(i)>Var
+       m_GPR= [m_GPR,i];
+    end
+end
+% SVM
+for i=1:m_size 
+    R_L_SVM=residual_L_SVM(:,i);
+    Mean_Residual_L_SVM(i)=nanmean(R_L_SVM);
+    Var_Residual_L_SVM(i)=nanvar(R_L_SVM);
+    Number(i)=i;%  u
+end
+Mean=0.36;Var=0.01;
+m_SVM=[];
+for i=1:max(size(Mean_Residual_L_SVM))
+    if Mean_Residual_L_SVM(i)>Mean | Var_Residual_L_SVM(i)>Var
+       m_SVM= [m_SVM,i];
+    end
+end
+%BP
+for i=1:m_size 
+    R_L_BP=residual_L_BP(:,i);
+    Mean_Residual_L_BP(i)=nanmean(R_L_BP);%mean
+    Var_Residual_L_BP(i)=nanvar(R_L_BP);%Var
+    Number(i)=i;%
+end
+Mean=0.27;Var=0.02;
+for i=1:max(size(Mean_Residual_L_BP))
+    if Mean_Residual_L_BP(i)>Mean | Var_Residual_L_BP(i)>Var
+       m_BP= [m_BP,i];
+    end
+end
+%%
+figure
+plot(Mean_Residual_L_BP,Var_Residual_L_BP,'r.');%Draw a scatter plot
+hold on
+for i = 1:max(size(Mean_Residual_L_BP))
+    c = num2str(i);
+    if Mean_Residual_L_BP(i) > Mean || Var_Residual_L_BP(i) > Var
+        text(Mean_Residual_L_BP(i), Var_Residual_L_BP(i), c, 'Color', 'r');
+    else
+        text(Mean_Residual_L_BP(i), Var_Residual_L_BP(i), c);
+    end
+end
+xlabel('mean');
+ylabel('variance');
+plot([0,0.5],[Var,Var],'b' ,'linewidth',1) 
+plot([Mean,Mean],[0,0.035],'b','linewidth',1)
+hold off
+%
+A=[m_PLS,m_GPR,m_SVM,m_BP];
+reject2 = findDuplicates(A,2);
+reject3 = findDuplicates(A,3);
+reject4 = findDuplicates(A,4);
+reject2=[reject2 reject3 reject4 ];
+reject3=[reject3 reject4];
